@@ -1733,7 +1733,7 @@ def main():
         return 1
 
     try:
-        kb = MultiDocumentKnowledgeBase("../RAG/multimodel_doc_kb_memory_qwen_chunk", openai_api_key=openai_api_key)
+        kb = MultiDocumentKnowledgeBase("./multimodel_doc_kb_memory_qwen_chunk", openai_api_key=openai_api_key)
 
         current_session_id = "user1_session"
 
