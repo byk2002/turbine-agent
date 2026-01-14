@@ -314,18 +314,21 @@ class TurbineCourseAgent:
             chain = intent_prompt | self.llm | StrOutputParser()
             result = chain.invoke({"input": user_input})
 
-            # 解析JSON
-            # 清理可能的markdown标记
-            result = result.strip()
-            if result.startswith("```json"):
-                result = result[7:]
-            if result.startswith("```"):
-                result = result[3:]
-            if result.endswith("```"):
-                result = result[:-3]
-            result = result.strip()
-
-            parsed = json.loads(result)
+            # 【修改开始】使用正则提取 JSON，增强健壮性
+            import re
+            try:
+                # 尝试匹配大括号 {} 包裹的内容
+                match = re.search(r"(\{.*\})", result, re.DOTALL)
+                if match:
+                    json_str = match.group(1)
+                    parsed = json.loads(json_str)
+                else:
+                    # 兜底：尝试直接解析
+                    parsed = json.loads(result)
+            except json.JSONDecodeError:
+                logger.warning(f"JSON 解析失败，原始结果: {result}")
+                # 解析失败时，默认设为 QA 模式，避免流程中断
+                parsed = {"intent": "qa", "confidence": 0.5}
 
             intent_str = parsed.get("intent", "unknown")
             confidence = parsed.get("confidence", 0.5)
