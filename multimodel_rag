@@ -28,7 +28,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
-
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.chat_history import BaseChatMessageHistory
@@ -145,10 +145,16 @@ class ChineseBM25Retriever(BM25Retriever):
         ]
         return super().from_documents(processed_docs, **kwargs)
 
-    def _get_relevant_documents(self, query: str) -> List[Document]:
+    def _get_relevant_documents(
+        self, 
+        query: str, 
+        *, 
+        run_manager: CallbackManagerForRetrieverRun = None
+    ) -> List[Document]:
         # 对查询也进行分词
         query_words = " ".join(jieba.lcut(query))
-        return super()._get_relevant_documents(query_words)
+        # 将 run_manager 传递给父类
+        return super()._get_relevant_documents(query_words, run_manager=run_manager)
 
 
 # 【修改点 1】添加 @dataclass 装饰器
