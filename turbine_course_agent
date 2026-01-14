@@ -137,7 +137,7 @@ class KnowledgeBaseAdapter:
             return []
 
         try:
-            return self.kb.query(question, k=k, rerank_top_n=3)
+            return self.kb.search(question, k=k)
         except Exception as e:
             logger.error(f"检索失败: {e}")
             return []
@@ -194,7 +194,7 @@ class TurbineCourseAgent:
             custom_fine_tuned_llm: 用户微调的专业领域模型
         """
         # 知识库适配器
-        self.kb_adapter = KnowledgeBaseAdapter(MultiDocumentKnowledgeBase, custom_fine_tuned_llm)
+        self.kb_adapter = KnowledgeBaseAdapter(knowledge_base, custom_fine_tuned_llm)
 
         # LLM 配置（优先使用微调模型）
         if custom_fine_tuned_llm:
