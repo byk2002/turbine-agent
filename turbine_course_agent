@@ -135,7 +135,6 @@ class KnowledgeBaseAdapter:
         if self.kb is None:
             logger.warning("知识库未初始化")
             return []
-
         try:
             return self.kb.search(question, k=k)
         except Exception as e:
