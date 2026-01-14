@@ -1,0 +1,1170 @@
+"""
+透平机械原理课程智能体 Agent
+基于 LangGraph 构建的教育领域专用 Agent
+功能：
+1. 专业问答 - 回答透平机械相关问题
+2. 生成练习题 - 根据章节内容生成问答/选择题
+3. 作业批改 - 评估学生答案并给出反馈
+4. 知识检索 - 从课件和教材中检索相关内容
+
+作者: Claude
+日期: 2024
+"""
+
+import os
+import json
+import logging
+import operator
+from typing import List, Dict, Any, Optional, TypedDict, Annotated, Literal, Union
+from pathlib import Path
+from dataclasses import dataclass, field
+from enum import Enum
+
+# LangGraph 核心组件
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+
+# LangChain 组件
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+from langchain_openai import ChatOpenAI
+from langchain_core.documents import Document
+from multimodel_rag import MultiDocumentKnowledgeBase
+# 日志配置
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+# ================================
+# 1. 状态定义
+# ================================
+
+class IntentType(str, Enum):
+    """用户意图类型"""
+    QA = "qa"  # 问答
+    GENERATE_QUESTIONS = "generate"  # 生成练习题
+    GRADE_HOMEWORK = "grade"  # 批改作业
+    SUMMARY = "summary"  # 章节总结
+    UNKNOWN = "unknown"  # 未知意图
+
+
+@dataclass
+class QuestionItem:
+    """练习题数据结构"""
+    question_type: str  # 题型: choice/fill_blank/short_answer/calculation
+    question: str  # 题目内容
+    options: List[str] = field(default_factory=list)  # 选择题选项
+    answer: str = ""  # 标准答案
+    explanation: str = ""  # 答案解析
+    difficulty: str = "medium"  # 难度: easy/medium/hard
+    knowledge_point: str = ""  # 知识点
+
+
+@dataclass
+class GradingResult:
+    """批改结果数据结构"""
+    score: float  # 得分 (0-100)
+    feedback: str  # 反馈意见
+    correct_points: List[str]  # 正确的点
+    wrong_points: List[str]  # 错误的点
+    suggestions: List[str]  # 改进建议
+    reference_answer: str = ""  # 参考答案
+
+
+class AgentState(TypedDict):
+    """Agent 状态定义"""
+    # 输入
+    user_input: str  # 用户输入
+    session_id: str  # 会话ID
+
+    # 意图识别
+    intent: IntentType  # 识别的意图
+    intent_confidence: float  # 意图置信度
+
+    # 上下文
+    chat_history: Annotated[List[BaseMessage], operator.add]  # 对话历史
+    retrieved_docs: List[Dict[str, Any]]  # 检索到的文档
+    retrieved_images: List[str]  # 检索到的图片路径
+
+    # 问答相关
+    qa_answer: str  # 问答回答
+    qa_confidence: float  # 回答置信度
+    qa_sources: List[Dict[str, Any]]  # 回答来源
+
+    # 练习题生成相关
+    chapter_info: str  # 章节信息
+    question_type: str  # 题目类型
+    question_count: int  # 题目数量
+    difficulty: str  # 难度要求
+    generated_questions: List[Dict[str, Any]]  # 生成的练习题
+
+    # 作业批改相关
+    student_answer: str  # 学生答案
+    reference_content: str  # 参考内容/标准答案
+    grading_result: Dict[str, Any]  # 批改结果
+
+    # 输出
+    final_response: str  # 最终回复
+    error_message: str  # 错误信息
+
+
+# ================================
+# 2. 知识库接口适配器
+# ================================
+
+class KnowledgeBaseAdapter:
+    """
+    知识库适配器 - 封装与现有 RAG 系统的交互
+    可以替换为用户自己的微调模型和知识库
+    """
+
+    def __init__(self, knowledge_base=None, custom_llm=None):
+        """
+        初始化知识库适配器
+
+        Args:
+            knowledge_base: 用户提供的知识库实例 (MultiDocumentKnowledgeBase)
+            custom_llm: 用户微调的大模型实例
+        """
+        self.kb = knowledge_base
+        self.custom_llm = custom_llm
+
+    def search(self, question: str, k: int = 8) -> List[Document]:
+        """检索相关文档"""
+        if self.kb is None:
+            logger.warning("知识库未初始化")
+            return []
+
+        try:
+            return self.kb.query(question, k=k, rerank_top_n=3)
+        except Exception as e:
+            logger.error(f"检索失败: {e}")
+            return []
+
+    def query_with_rerank(self, question: str, session_id: str, **kwargs) -> Dict[str, Any]:
+        """执行带重排序的查询"""
+        if self.kb is None:
+            return {"answer": "", "sources": [], "confidence": 0.0}
+
+        try:
+            return self.kb.query(question, session_id=session_id, **kwargs)
+        except Exception as e:
+            logger.error(f"查询失败: {e}")
+            return {"answer": f"查询出错: {e}", "sources": [], "confidence": 0.0}
+
+    def get_chapter_content(self, chapter_name: str) -> str:
+        """获取指定章节的内容"""
+        if self.kb is None:
+            return ""
+
+        # 检索章节相关内容
+        docs = self.search(f"{chapter_name} 内容 概述", k=10)
+        if docs:
+            return "\n\n".join([doc.page_content for doc in docs])
+        return ""
+
+    def get_llm(self):
+        """获取LLM实例（优先使用用户自定义的微调模型）"""
+        if self.custom_llm:
+            return self.custom_llm
+        # 返回None，由调用方处理
+        return None
+
+
+# ================================
+# 3. Agent 节点实现
+# ================================
+
+class TurbineCourseAgent:
+    """透平机械原理课程智能体"""
+
+    def __init__(
+            self,
+            knowledge_base=None,
+            llm: Optional[ChatOpenAI] = None,
+            custom_fine_tuned_llm=None
+    ):
+        """
+        初始化 Agent
+
+        Args:
+            knowledge_base: MultiDocumentKnowledgeBase 实例
+            llm: 默认 LLM (如 ChatOpenAI)
+            custom_fine_tuned_llm: 用户微调的专业领域模型
+        """
+        # 知识库适配器
+        self.kb_adapter = KnowledgeBaseAdapter(MultiDocumentKnowledgeBase, custom_fine_tuned_llm)
+
+        # LLM 配置（优先使用微调模型）
+        if custom_fine_tuned_llm:
+            self.llm = custom_fine_tuned_llm
+            logger.info("使用用户提供的微调模型")
+        elif llm:
+            self.llm = llm
+            logger.info("使用默认 LLM")
+        else:
+            raise ValueError("必须提供 llm 或 custom_fine_tuned_llm 参数")
+
+        # 构建 Graph
+        self.graph = self._build_graph()
+
+        # 检查点保存器（用于对话持久化）
+        self.memory = MemorySaver()
+
+        # 编译 Graph
+        self.app = self.graph.compile(checkpointer=self.memory)
+
+        logger.info("透平机械原理课程智能体初始化完成")
+
+    def _build_graph(self) -> StateGraph:
+        """构建 LangGraph 工作流"""
+
+        # 创建状态图
+        workflow = StateGraph(AgentState)
+
+        # 添加节点
+        workflow.add_node("intent_classifier", self._intent_classifier_node)
+        workflow.add_node("retriever", self._retriever_node)
+        workflow.add_node("qa_node", self._qa_node)
+        workflow.add_node("question_generator", self._question_generator_node)
+        workflow.add_node("homework_grader", self._homework_grader_node)
+        workflow.add_node("summary_node", self._summary_node)
+        workflow.add_node("response_formatter", self._response_formatter_node)
+        workflow.add_node("error_handler", self._error_handler_node)
+
+        # 设置入口
+        workflow.set_entry_point("intent_classifier")
+
+        # 添加条件边 - 根据意图路由
+        workflow.add_conditional_edges(
+            "intent_classifier",
+            self._route_by_intent,
+            {
+                "qa": "retriever",
+                "generate": "retriever",
+                "grade": "homework_grader",
+                "summary": "retriever",
+                "error": "error_handler"
+            }
+        )
+
+        # 检索后的路由
+        workflow.add_conditional_edges(
+            "retriever",
+            self._route_after_retrieval,
+            {
+                "qa": "qa_node",
+                "generate": "question_generator",
+                "summary": "summary_node"
+            }
+        )
+
+        # 各节点到格式化输出
+        workflow.add_edge("qa_node", "response_formatter")
+        workflow.add_edge("question_generator", "response_formatter")
+        workflow.add_edge("homework_grader", "response_formatter")
+        workflow.add_edge("summary_node", "response_formatter")
+        workflow.add_edge("error_handler", "response_formatter")
+
+        # 格式化输出到结束
+        workflow.add_edge("response_formatter", END)
+
+        return workflow
+
+    # --------------------------------
+    # 节点实现
+    # --------------------------------
+
+    def _intent_classifier_node(self, state: AgentState) -> AgentState:
+        """意图识别节点"""
+        user_input = state["user_input"]
+
+        # 意图分类提示词
+        intent_prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是一个透平机械原理课程的教学助手，负责识别用户的意图。
+
+请根据用户输入，判断其意图类型，只能返回以下JSON格式：
+
+```json
+{{
+    "intent": "意图类型",
+    "confidence": 置信度(0-1),
+    "extracted_info": {{
+        "chapter": "提取的章节信息（如有）",
+        "question_type": "题目类型（如有）: choice/fill_blank/short_answer/calculation",
+        "count": 题目数量（如有）,
+        "difficulty": "难度（如有）: easy/medium/hard",
+        "student_answer": "学生答案（如有）"
+    }}
+}}
+```
+
+意图类型说明：
+- "qa": 用户在提问或询问知识点（如：什么是透平？轴流式压缩机的工作原理？）
+- "generate": 用户要求生成练习题（如：给我出5道选择题、生成第三章的计算题）
+- "grade": 用户要求批改作业或评估答案（如：帮我批改这道题、我的答案对吗）
+- "summary": 用户要求总结章节内容（如：总结第二章、归纳知识点）
+- "unknown": 无法识别的意图
+
+注意：只返回JSON，不要有其他内容。"""),
+            ("user", "{input}")
+        ])
+
+        try:
+            chain = intent_prompt | self.llm | StrOutputParser()
+            result = chain.invoke({"input": user_input})
+
+            # 解析JSON
+            # 清理可能的markdown标记
+            result = result.strip()
+            if result.startswith("```json"):
+                result = result[7:]
+            if result.startswith("```"):
+                result = result[3:]
+            if result.endswith("```"):
+                result = result[:-3]
+            result = result.strip()
+
+            parsed = json.loads(result)
+
+            intent_str = parsed.get("intent", "unknown")
+            confidence = parsed.get("confidence", 0.5)
+            extracted = parsed.get("extracted_info", {})
+
+            # 映射意图
+            intent_map = {
+                "qa": IntentType.QA,
+                "generate": IntentType.GENERATE_QUESTIONS,
+                "grade": IntentType.GRADE_HOMEWORK,
+                "summary": IntentType.SUMMARY,
+                "unknown": IntentType.UNKNOWN
+            }
+
+            intent = intent_map.get(intent_str, IntentType.UNKNOWN)
+
+            logger.info(f"识别意图: {intent.value}, 置信度: {confidence}")
+
+            return {
+                **state,
+                "intent": intent,
+                "intent_confidence": confidence,
+                "chapter_info": extracted.get("chapter", ""),
+                "question_type": extracted.get("question_type", "short_answer"),
+                "question_count": extracted.get("count", 5),
+                "difficulty": extracted.get("difficulty", "medium"),
+                "student_answer": extracted.get("student_answer", state.get("student_answer", ""))
+            }
+
+        except Exception as e:
+            logger.error(f"意图识别失败: {e}")
+            return {
+                **state,
+                "intent": IntentType.QA,  # 默认当作问答
+                "intent_confidence": 0.3,
+                "error_message": f"意图识别出现问题: {str(e)}"
+            }
+
+    def _retriever_node(self, state: AgentState) -> AgentState:
+        """检索节点 - 从知识库检索相关内容"""
+        user_input = state["user_input"]
+        chapter_info = state.get("chapter_info", "")
+
+        # 构建检索查询
+        if chapter_info:
+            query = f"{chapter_info} {user_input}"
+        else:
+            query = user_input
+
+        try:
+            # 使用知识库检索
+            docs = self.kb_adapter.search(query, k=10)
+
+            retrieved_docs = []
+            retrieved_images = []
+
+            for doc in docs:
+                doc_info = {
+                    "content": doc.page_content,
+                    "source": doc.metadata.get("file_name", "Unknown"),
+                    "page": doc.metadata.get("page_number", "N/A"),
+                    "chunk_id": doc.metadata.get("chunk_id", "")
+                }
+                retrieved_docs.append(doc_info)
+
+                # 提取图片路径
+                img_paths = doc.metadata.get("image_paths", [])
+                if isinstance(img_paths, str):
+                    try:
+                        import ast
+                        img_paths = ast.literal_eval(img_paths)
+                    except:
+                        img_paths = []
+
+                for img_path in img_paths:
+                    if img_path and Path(img_path).exists():
+                        retrieved_images.append(img_path)
+
+            logger.info(f"检索到 {len(retrieved_docs)} 个文档片段, {len(retrieved_images)} 张图片")
+
+            return {
+                **state,
+                "retrieved_docs": retrieved_docs,
+                "retrieved_images": retrieved_images[:3]  # 限制图片数量
+            }
+
+        except Exception as e:
+            logger.error(f"检索失败: {e}")
+            return {
+                **state,
+                "retrieved_docs": [],
+                "retrieved_images": [],
+                "error_message": f"知识检索失败: {str(e)}"
+            }
+
+    def _qa_node(self, state: AgentState) -> AgentState:
+        """问答节点 - 回答用户问题"""
+        user_input = state["user_input"]
+        retrieved_docs = state.get("retrieved_docs", [])
+        chat_history = state.get("chat_history", [])
+
+        # 构建上下文
+        context_parts = []
+        for doc in retrieved_docs[:7]:  # 取前7个文档
+            source_info = f"[来源: {doc['source']}, 页码: {doc['page']}]"
+            context_parts.append(f"{doc['content']}\n{source_info}")
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        # 问答提示词
+        qa_prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是透平机械原理课程的专业教学助手。你的任务是基于提供的课程资料，准确回答学生的问题。
+
+【回答原则】
+1. 答案必须基于提供的上下文资料，不要编造信息
+2. 使用专业但易懂的语言，适合本科生理解
+3. 如有必要，可以使用公式、图示说明（用文字描述）
+4. 如果资料不足以回答，请诚实说明
+5. 鼓励学生深入思考，可以提供相关延伸问题
+
+【课程背景】
+透平机械原理涵盖：
+- 透平机械基本概念与分类
+- 叶轮机械的基本方程
+- 轴流式压缩机/透平的工作原理
+- 离心式压缩机的工作原理
+- 级的性能与调节
+- 多级透平机械
+
+【上下文资料】
+{context}"""),
+            MessagesPlaceholder(variable_name="history"),
+            ("user", "{question}")
+        ])
+
+        try:
+            chain = qa_prompt | self.llm | StrOutputParser()
+            answer = chain.invoke({
+                "context": context if context else "（暂无相关资料，将基于通用知识回答）",
+                "history": chat_history[-6:] if chat_history else [],  # 最近3轮对话
+                "question": user_input
+            })
+
+            # 计算置信度
+            confidence = 0.8 if retrieved_docs else 0.4
+
+            # 整理来源
+            sources = []
+            seen = set()
+            for doc in retrieved_docs[:5]:
+                key = f"{doc['source']}_{doc['page']}"
+                if key not in seen:
+                    sources.append({
+                        "file": doc['source'],
+                        "page": doc['page']
+                    })
+                    seen.add(key)
+
+            logger.info(f"问答完成，置信度: {confidence}")
+
+            return {
+                **state,
+                "qa_answer": answer,
+                "qa_confidence": confidence,
+                "qa_sources": sources,
+                "chat_history": chat_history + [
+                    HumanMessage(content=user_input),
+                    AIMessage(content=answer)
+                ]
+            }
+
+        except Exception as e:
+            logger.error(f"问答失败: {e}")
+            return {
+                **state,
+                "qa_answer": f"抱歉，回答您的问题时出现错误: {str(e)}",
+                "qa_confidence": 0.0,
+                "qa_sources": []
+            }
+
+    def _question_generator_node(self, state: AgentState) -> AgentState:
+        """练习题生成节点"""
+        chapter_info = state.get("chapter_info", "透平机械原理")
+        question_type = state.get("question_type", "short_answer")
+        question_count = state.get("question_count", 5)
+        difficulty = state.get("difficulty", "medium")
+        retrieved_docs = state.get("retrieved_docs", [])
+
+        # 构建上下文
+        context = "\n\n".join([doc["content"] for doc in retrieved_docs[:5]])
+
+        # 题型说明
+        type_instructions = {
+            "choice": "选择题（单选），需要提供4个选项A/B/C/D",
+            "fill_blank": "填空题，用___表示空白处",
+            "short_answer": "简答题，需要简短回答（50-150字）",
+            "calculation": "计算题，需要给出计算步骤和答案"
+        }
+
+        difficulty_desc = {
+            "easy": "基础概念题，直接考查定义和基本原理",
+            "medium": "中等难度，需要理解和简单应用",
+            "hard": "较难，需要综合分析和灵活运用"
+        }
+
+        # 生成提示词
+        gen_prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是透平机械原理课程的出题专家。请根据给定的课程内容和要求，生成高质量的练习题。
+
+【出题要求】
+- 章节/知识点: {chapter}
+- 题型: {type_desc}
+- 数量: {count}道
+- 难度: {difficulty_desc}
+
+【参考资料】
+{context}
+
+【输出格式】
+请以JSON数组格式输出，每道题包含：
+```json
+[
+    {{
+        "question_type": "题型",
+        "question": "题目内容",
+        "options": ["A. 选项1", "B. 选项2", "C. 选项3", "D. 选项4"],  // 选择题必填
+        "answer": "标准答案",
+        "explanation": "答案解析",
+        "difficulty": "难度",
+        "knowledge_point": "考查的知识点"
+    }}
+]
+```
+
+【注意事项】
+1. 题目要紧扣透平机械原理的核心知识点
+2. 答案要准确，解析要详细
+3. 难度要符合要求
+4. 如果是计算题，答案要包含完整的计算过程"""),
+            ("user", "请生成{count}道关于{chapter}的{type_name}，难度为{difficulty}。")
+        ])
+
+        try:
+            chain = gen_prompt | self.llm | StrOutputParser()
+            result = chain.invoke({
+                "chapter": chapter_info,
+                "type_desc": type_instructions.get(question_type, "简答题"),
+                "type_name": question_type,
+                "count": question_count,
+                "difficulty": difficulty,
+                "difficulty_desc": difficulty_desc.get(difficulty, "中等难度"),
+                "context": context if context else "（无额外参考资料，请基于透平机械原理通用知识出题）"
+            })
+
+            # 解析JSON
+            result = result.strip()
+            if "```json" in result:
+                result = result.split("```json")[1].split("```")[0]
+            elif "```" in result:
+                result = result.split("```")[1].split("```")[0]
+
+            questions = json.loads(result)
+
+            logger.info(f"成功生成 {len(questions)} 道练习题")
+
+            return {
+                **state,
+                "generated_questions": questions
+            }
+
+        except json.JSONDecodeError as e:
+            logger.error(f"解析练习题JSON失败: {e}")
+            # 尝试直接返回文本格式
+            return {
+                **state,
+                "generated_questions": [{"raw_text": result, "parse_error": str(e)}],
+                "error_message": "练习题格式解析失败，已返回原始文本"
+            }
+        except Exception as e:
+            logger.error(f"生成练习题失败: {e}")
+            return {
+                **state,
+                "generated_questions": [],
+                "error_message": f"生成练习题失败: {str(e)}"
+            }
+
+    def _homework_grader_node(self, state: AgentState) -> AgentState:
+        """作业批改节点"""
+        user_input = state["user_input"]
+        student_answer = state.get("student_answer", "")
+        reference_content = state.get("reference_content", "")
+
+        # 如果没有单独的学生答案，尝试从用户输入中提取
+        if not student_answer:
+            student_answer = user_input
+
+        # 批改提示词
+        grade_prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是透平机械原理课程的作业批改助手。请对学生的答案进行专业、客观、鼓励性的评价。
+
+【评分标准】
+1. 概念准确性（40%）: 专业术语使用是否正确，概念理解是否准确
+2. 逻辑完整性（30%）: 答案是否完整，逻辑是否清晰
+3. 表达规范性（20%）: 表达是否清晰，公式符号是否规范
+4. 创新思考（10%）: 是否有独到见解或延伸思考
+
+【输出格式】
+请以JSON格式输出评价结果：
+```json
+{{
+    "score": 得分(0-100),
+    "level": "评级(优秀/良好/中等/及格/不及格)",
+    "feedback": "总体评价",
+    "correct_points": ["答对的知识点1", "答对的知识点2"],
+    "wrong_points": ["错误点1及原因", "错误点2及原因"],
+    "suggestions": ["改进建议1", "改进建议2"],
+    "reference_answer": "参考答案或补充说明"
+}}
+```
+
+【批改原则】
+1. 客观公正，有理有据
+2. 指出问题的同时给予鼓励
+3. 提供具体的改进方向
+4. 如果答案基本正确但表述不完善，也要肯定学生的思路"""),
+            ("user", """【学生答案】
+{student_answer}
+
+【参考资料/标准答案】
+{reference}
+
+请批改这份作业。""")
+        ])
+
+        try:
+            chain = grade_prompt | self.llm | StrOutputParser()
+            result = chain.invoke({
+                "student_answer": student_answer,
+                "reference": reference_content if reference_content else "（无标准答案参考，请基于专业知识评判）"
+            })
+
+            # 解析JSON
+            result = result.strip()
+            if "```json" in result:
+                result = result.split("```json")[1].split("```")[0]
+            elif "```" in result:
+                result = result.split("```")[1].split("```")[0]
+
+            grading = json.loads(result)
+
+            logger.info(f"批改完成，得分: {grading.get('score', 'N/A')}")
+
+            return {
+                **state,
+                "grading_result": grading
+            }
+
+        except Exception as e:
+            logger.error(f"批改失败: {e}")
+            return {
+                **state,
+                "grading_result": {
+                    "score": -1,
+                    "feedback": f"批改过程出现错误: {str(e)}",
+                    "correct_points": [],
+                    "wrong_points": [],
+                    "suggestions": ["请重新提交作业"]
+                }
+            }
+
+    def _summary_node(self, state: AgentState) -> AgentState:
+        """章节总结节点"""
+        chapter_info = state.get("chapter_info", "")
+        retrieved_docs = state.get("retrieved_docs", [])
+
+        # 构建上下文
+        context = "\n\n".join([doc["content"] for doc in retrieved_docs])
+
+        # 总结提示词
+        summary_prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是透平机械原理课程的教学助手。请根据提供的资料，对指定章节进行系统性总结。
+
+【总结要求】
+1. 提炼核心知识点和重要概念
+2. 归纳关键公式和原理
+3. 指出学习重点和难点
+4. 列出常见考点
+5. 提供学习建议
+
+【输出格式】
+## {chapter} 知识点总结
+
+### 一、核心概念
+- 概念1: 解释
+- 概念2: 解释
+
+### 二、重要公式
+- 公式1: 含义说明
+- 公式2: 含义说明
+
+### 三、学习重点
+1. 重点1
+2. 重点2
+
+### 四、常见考点
+1. 考点1
+2. 考点2
+
+### 五、学习建议
+- 建议1
+- 建议2"""),
+            ("user", """【章节信息】
+{chapter}
+
+【参考资料】
+{context}
+
+请生成该章节的知识点总结。""")
+        ])
+
+        try:
+            chain = summary_prompt | self.llm | StrOutputParser()
+            summary = chain.invoke({
+                "chapter": chapter_info if chapter_info else "透平机械原理",
+                "context": context if context else "（无额外参考资料）"
+            })
+
+            return {
+                **state,
+                "qa_answer": summary,
+                "qa_confidence": 0.85 if retrieved_docs else 0.6
+            }
+
+        except Exception as e:
+            logger.error(f"总结生成失败: {e}")
+            return {
+                **state,
+                "qa_answer": f"生成总结时出现错误: {str(e)}",
+                "qa_confidence": 0.0
+            }
+
+    def _response_formatter_node(self, state: AgentState) -> AgentState:
+        """响应格式化节点 - 将各节点输出格式化为最终响应"""
+        intent = state.get("intent", IntentType.UNKNOWN)
+        error_msg = state.get("error_message", "")
+
+        if error_msg and intent == IntentType.UNKNOWN:
+            response = f"❌ 抱歉，处理您的请求时遇到问题：\n{error_msg}\n\n您可以尝试：\n- 提问透平机械相关知识\n- 让我生成练习题\n- 提交作业让我批改"
+
+        elif intent == IntentType.QA:
+            answer = state.get("qa_answer", "")
+            sources = state.get("qa_sources", [])
+            confidence = state.get("qa_confidence", 0)
+
+            response = f"📚 **回答**\n\n{answer}"
+
+            if sources:
+                response += "\n\n---\n📖 **参考来源**"
+                for src in sources[:3]:
+                    response += f"\n- {src['file']} (第{src['page']}页)"
+
+            if confidence < 0.5:
+                response += "\n\n⚠️ *注：相关资料有限，建议查阅教材确认。*"
+
+        elif intent == IntentType.GENERATE_QUESTIONS:
+            questions = state.get("generated_questions", [])
+            chapter = state.get("chapter_info", "透平机械原理")
+            qtype = state.get("question_type", "综合")
+
+            response = f"📝 **{chapter} - {qtype}练习题**\n\n"
+
+            for i, q in enumerate(questions, 1):
+                if isinstance(q, dict):
+                    if "raw_text" in q:
+                        response += q["raw_text"]
+                    else:
+                        response += f"**第{i}题** ({q.get('difficulty', '中等')})\n"
+                        response += f"{q.get('question', '')}\n"
+
+                        if q.get('options'):
+                            for opt in q['options']:
+                                response += f"  {opt}\n"
+
+                        response += f"\n<details>\n<summary>点击查看答案</summary>\n\n"
+                        response += f"**答案**: {q.get('answer', '')}\n\n"
+                        response += f"**解析**: {q.get('explanation', '')}\n\n"
+                        response += f"**知识点**: {q.get('knowledge_point', '')}\n"
+                        response += f"</details>\n\n---\n\n"
+
+        elif intent == IntentType.GRADE_HOMEWORK:
+            grading = state.get("grading_result", {})
+
+            score = grading.get("score", -1)
+            level = grading.get("level", "未评级")
+            feedback = grading.get("feedback", "")
+            correct = grading.get("correct_points", [])
+            wrong = grading.get("wrong_points", [])
+            suggestions = grading.get("suggestions", [])
+            ref_answer = grading.get("reference_answer", "")
+
+            if score >= 0:
+                # 根据分数选择emoji
+                if score >= 90:
+                    emoji = "🌟"
+                elif score >= 80:
+                    emoji = "👍"
+                elif score >= 70:
+                    emoji = "📈"
+                elif score >= 60:
+                    emoji = "💪"
+                else:
+                    emoji = "📚"
+
+                response = f"{emoji} **作业批改结果**\n\n"
+                response += f"**得分**: {score}分 ({level})\n\n"
+                response += f"**总评**: {feedback}\n\n"
+
+                if correct:
+                    response += "✅ **正确之处**:\n"
+                    for c in correct:
+                        response += f"- {c}\n"
+                    response += "\n"
+
+                if wrong:
+                    response += "❌ **需要改进**:\n"
+                    for w in wrong:
+                        response += f"- {w}\n"
+                    response += "\n"
+
+                if suggestions:
+                    response += "💡 **改进建议**:\n"
+                    for s in suggestions:
+                        response += f"- {s}\n"
+                    response += "\n"
+
+                if ref_answer:
+                    response += f"📖 **参考答案**:\n{ref_answer}"
+            else:
+                response = f"❌ 批改失败: {feedback}"
+
+        elif intent == IntentType.SUMMARY:
+            summary = state.get("qa_answer", "")
+            response = summary
+
+        else:
+            response = "🤔 抱歉，我没有理解您的意图。我可以帮您：\n\n"
+            response += "1. **回答问题** - 直接提问透平机械相关知识\n"
+            response += "2. **生成练习题** - 例如：给我出5道关于轴流式压缩机的选择题\n"
+            response += "3. **批改作业** - 例如：帮我批改这道题：[您的答案]\n"
+            response += "4. **总结章节** - 例如：总结离心式压缩机的知识点\n"
+
+        return {
+            **state,
+            "final_response": response
+        }
+
+    def _error_handler_node(self, state: AgentState) -> AgentState:
+        """错误处理节点"""
+        error_msg = state.get("error_message", "未知错误")
+
+        return {
+            **state,
+            "final_response": f"处理请求时遇到错误: {error_msg}\n请稍后重试或换一种方式提问。"
+        }
+
+    # --------------------------------
+    # 路由函数
+    # --------------------------------
+
+    def _route_by_intent(self, state: AgentState) -> str:
+        """根据意图路由"""
+        intent = state.get("intent", IntentType.UNKNOWN)
+        confidence = state.get("intent_confidence", 0)
+
+        if confidence < 0.3:
+            return "error"
+
+        route_map = {
+            IntentType.QA: "qa",
+            IntentType.GENERATE_QUESTIONS: "generate",
+            IntentType.GRADE_HOMEWORK: "grade",
+            IntentType.SUMMARY: "summary",
+            IntentType.UNKNOWN: "qa"  # 默认当作问答
+        }
+
+        return route_map.get(intent, "qa")
+
+    def _route_after_retrieval(self, state: AgentState) -> str:
+        """检索后路由"""
+        intent = state.get("intent", IntentType.QA)
+
+        route_map = {
+            IntentType.QA: "qa",
+            IntentType.GENERATE_QUESTIONS: "generate",
+            IntentType.SUMMARY: "summary"
+        }
+
+        return route_map.get(intent, "qa")
+
+    # --------------------------------
+    # 公共接口
+    # --------------------------------
+
+    def chat(
+            self,
+            user_input: str,
+            session_id: str = "default",
+            **kwargs
+    ) -> Dict[str, Any]:
+        """
+        与 Agent 对话
+
+        Args:
+            user_input: 用户输入
+            session_id: 会话ID
+            **kwargs: 额外参数 (如 student_answer, reference_content)
+
+        Returns:
+            包含回复和元数据的字典
+        """
+        # 初始化状态
+        initial_state: AgentState = {
+            "user_input": user_input,
+            "session_id": session_id,
+            "intent": IntentType.UNKNOWN,
+            "intent_confidence": 0.0,
+            "chat_history": [],
+            "retrieved_docs": [],
+            "retrieved_images": [],
+            "qa_answer": "",
+            "qa_confidence": 0.0,
+            "qa_sources": [],
+            "chapter_info": kwargs.get("chapter_info", ""),
+            "question_type": kwargs.get("question_type", "short_answer"),
+            "question_count": kwargs.get("question_count", 5),
+            "difficulty": kwargs.get("difficulty", "medium"),
+            "generated_questions": [],
+            "student_answer": kwargs.get("student_answer", ""),
+            "reference_content": kwargs.get("reference_content", ""),
+            "grading_result": {},
+            "final_response": "",
+            "error_message": ""
+        }
+
+        # 配置（用于检查点）
+        config = {"configurable": {"thread_id": session_id}}
+
+        try:
+            # 运行 Graph
+            final_state = self.app.invoke(initial_state, config)
+
+            return {
+                "response": final_state.get("final_response", ""),
+                "intent": final_state.get("intent", IntentType.UNKNOWN).value,
+                "confidence": final_state.get("qa_confidence", final_state.get("intent_confidence", 0)),
+                "sources": final_state.get("qa_sources", []),
+                "questions": final_state.get("generated_questions", []),
+                "grading": final_state.get("grading_result", {}),
+                "session_id": session_id
+            }
+
+        except Exception as e:
+            logger.exception(f"Agent 执行出错: {e}")
+            return {
+                "response": f"抱歉，处理您的请求时出现错误: {str(e)}",
+                "intent": "error",
+                "confidence": 0.0,
+                "sources": [],
+                "session_id": session_id
+            }
+
+    def generate_questions(
+            self,
+            chapter: str,
+            question_type: str = "short_answer",
+            count: int = 5,
+            difficulty: str = "medium"
+    ) -> List[Dict[str, Any]]:
+        """
+        直接生成练习题的便捷方法
+
+        Args:
+            chapter: 章节名称
+            question_type: 题型 (choice/fill_blank/short_answer/calculation)
+            count: 题目数量
+            difficulty: 难度 (easy/medium/hard)
+        """
+        prompt = f"请给我出{count}道关于{chapter}的{question_type}，难度为{difficulty}"
+
+        result = self.chat(
+            prompt,
+            chapter_info=chapter,
+            question_type=question_type,
+            question_count=count,
+            difficulty=difficulty
+        )
+
+        return result.get("questions", [])
+
+    def grade_answer(
+            self,
+            student_answer: str,
+            reference: str = ""
+    ) -> Dict[str, Any]:
+        """
+        批改答案的便捷方法
+
+        Args:
+            student_answer: 学生答案
+            reference: 参考答案或评分标准
+        """
+        result = self.chat(
+            f"请批改以下答案: {student_answer}",
+            student_answer=student_answer,
+            reference_content=reference
+        )
+
+        return result.get("grading", {})
+
+
+# ================================
+# 4. 使用示例和主程序
+# ================================
+
+def create_agent_with_custom_model(
+        kb_path: str,
+        openai_api_key: str,
+        openai_api_base: str = "https://api.zchat.tech/v1",
+        model_name: str = "gpt-4o",
+        custom_model_path: str = None
+):
+    """
+    创建带有自定义模型的 Agent 工厂函数
+
+    Args:
+        kb_path: 知识库路径
+        openai_api_key: API Key
+        openai_api_base: API Base URL
+        model_name: 模型名称
+        custom_model_path: 自定义微调模型路径（如果有）
+    """
+    # 创建 LLM
+    llm = ChatOpenAI(
+        openai_api_key=openai_api_key,
+        openai_api_base=openai_api_base,
+        model=model_name,
+        temperature=0.3
+    )
+
+    # 如果提供了自定义模型路径，可以加载本地模型
+    # 这里预留接口，用户可以替换为自己的微调模型
+    custom_llm = None
+    if custom_model_path:
+        # 示例：加载本地微调模型
+        # from transformers import AutoModelForCausalLM, AutoTokenizer
+        # custom_llm = YourCustomLLMWrapper(custom_model_path)
+        logger.info(f"加载自定义模型: {custom_model_path}")
+        pass
+
+    # 尝试导入并创建知识库
+    knowledge_base = None
+    try:
+        # 这里假设用户已经有 MultiDocumentKnowledgeBase
+        # 可以从用户的原始代码导入
+        logger.info(f"知识库路径: {kb_path}")
+        knowledge_base = MultiDocumentKnowledgeBase(kb_path, openai_api_key)
+    except Exception as e:
+        logger.warning(f"知识库初始化失败: {e}，将在无知识库模式下运行")
+
+    # 创建 Agent
+    agent = TurbineCourseAgent(
+        knowledge_base=knowledge_base,
+        llm=llm,
+        custom_fine_tuned_llm=custom_llm
+    )
+
+    return agent
+
+
+def main():
+    """主程序 - 交互式命令行界面"""
+    print("=" * 60)
+    print("透平机械原理课程智能助手")
+    print("基于 LangGraph 构建")
+    print("=" * 60)
+
+    # 配置
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        print("请设置 OPENAI_API_KEY 环境变量")
+        return
+
+    # 创建 LLM
+    llm = ChatOpenAI(
+        openai_api_key=openai_api_key,
+        openai_api_base=os.getenv("OPENAI_API_BASE", "https://api.zchat.tech/v1"),
+        model=os.getenv("MODEL_NAME", "gpt-5-1"),
+        temperature=0.3
+    )
+
+    # 创建 Agent
+    agent = TurbineCourseAgent(llm=llm)
+
+    session_id = "demo_session"
+
+    print("\n功能说明:")
+    print("1. 直接提问 - 回答透平机械相关问题")
+    print("2. 生成练习题 - 例如：出5道轴流式压缩机的选择题")
+    print("3. 批改作业 - 例如：批改：透平是将...的机械")
+    print("4. 总结章节 - 例如：总结离心式压缩机")
+    print("\n输入 'quit' 退出\n")
+
+    while True:
+        try:
+            user_input = input("👤 您: ").strip()
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in ['quit', 'exit', 'q']:
+                print("感谢使用，再见！")
+                break
+
+            print("\n🤖 助手: 正在处理...\n")
+
+            result = agent.chat(user_input, session_id=session_id)
+
+            print(result["response"])
+            print(f"\n[意图: {result['intent']}, 置信度: {result['confidence']:.2f}]")
+            print("-" * 60)
+
+        except KeyboardInterrupt:
+            print("\n\n感谢使用，再见！")
+            break
+        except Exception as e:
+            print(f"\n❌ 错误: {e}")
+            print("-" * 60)
+
+
+if __name__ == "__main__":
+    main()
