@@ -372,7 +372,7 @@ class MultiDocumentKnowledgeBase:
         else:
                 # 默认回退逻辑，或者连接您的微调模型 endpoint
             self.llm = ChatOpenAI(
-                openai_api_key="openai_api_key",  # 本地模型通常不需要真实 Key
+                openai_api_key=self._openai_api_key,  # 本地模型通常不需要真实 Key
                 openai_api_base="https://api.zchat.tech/v1",  # 您的微调模型服务地址
                 model_name="gpt-5-1",  # 您的模型名称
                 temperature=0.1  # 专业领域建议低温度
