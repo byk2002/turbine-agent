@@ -1,0 +1,387 @@
+import streamlit as st
+import os
+import tempfile
+import shutil
+from pathlib import Path
+import time
+
+# 导入后端系统
+try:
+    from turbine_system_integration import TurbineMachinerySystem
+except ImportError:
+    st.error(
+        "无法导入后端模块，请确保 'turbine_system_integration.py', 'turbine_course_agent.py', 'multimodel_rag.py' 在同一目录下。")
+    st.stop()
+
+# ==========================================
+# 页面配置
+# ==========================================
+st.set_page_config(
+    page_title="透平机械原理智能教学系统",
+    page_icon="⚙️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# 自定义 CSS 样式
+st.markdown("""
+<style>
+    .stChatMessage {
+        background-color: #f0f2f6;
+        border-radius: 10px;
+        padding: 10px;
+    }
+    .stButton>button {
+        width: 100%;
+        border-radius: 5px;
+        height: 3em;
+    }
+    .source-box {
+        font-size: 0.8em;
+        color: #666;
+        background-color: #fff;
+        padding: 5px;
+        border-left: 3px solid #ff4b4b;
+        margin-top: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 状态管理 & 初始化
+# ==========================================
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "session_id" not in st.session_state:
+    st.session_state.session_id = "user_session_1"
+
+if "system_initialized" not in st.session_state:
+    st.session_state.system_initialized = False
+
+
+# 缓存系统实例，避免每次刷新重载
+@st.cache_resource
+def get_system(api_key, api_base):
+    try:
+        sys = TurbineMachinerySystem(
+            kb_path="./multimodel_doc_kb_memory_qwen_chunk",
+            openai_api_key=api_key,
+            openai_api_base=api_base,
+            model_name="gemini-3-pro"  # 或者你的模型 gpt-5-1
+        )
+        return sys
+    except Exception as e:
+        return None
+
+
+# ==========================================
+# 侧边栏：设置与知识库
+# ==========================================
+with st.sidebar:
+    st.title("⚙️ 系统设置")
+
+    # API 设置
+    api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+    api_base = st.text_input("API Base URL", value=os.getenv("OPENAI_API_BASE", "https://api.zchat.tech/v1"))
+
+    if not api_key:
+        st.warning("请输入 API Key 以启动系统")
+        st.stop()
+
+    # 初始化系统
+    system = get_system(api_key, api_base)
+    if not system:
+        st.error("系统初始化失败，请检查日志。")
+        st.stop()
+    else:
+        st.success("系统在线 🟢")
+
+    st.divider()
+
+    # 会话管理
+    st.subheader("会话管理")
+    new_session = st.text_input("当前会话 ID", value=st.session_state.session_id)
+    if new_session != st.session_state.session_id:
+        st.session_state.session_id = new_session
+        system.switch_session(new_session)
+        st.session_state.messages = []  # 切换会话时清空前端显示
+        st.rerun()
+
+    if st.button("🗑️ 清空当前会话历史"):
+        system.clear_session_history(st.session_state.session_id)
+        st.session_state.messages = []
+        st.success("历史已清空")
+        time.sleep(1)
+        st.rerun()
+
+    st.divider()
+
+    # 知识库管理
+    st.subheader("📚 知识库管理")
+
+    # 文件上传
+    uploaded_files = st.file_uploader("上传课程文档 (PDF/Word/Txt)", accept_multiple_files=True)
+    if uploaded_files:
+        if st.button("开始处理上传文件"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for idx, uploaded_file in enumerate(uploaded_files):
+                status_text.text(f"正在处理: {uploaded_file.name}...")
+
+                # 保存临时文件
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_path = tmp_file.name
+
+                # 实际上应该把文件移动到知识库可以引用的持久化位置，或者直接传路径
+                # 这里为了简单，我们假设 add_document 处理路径
+                # 为了保持文件名，我们复制到 ./temp_uploads 目录
+                upload_dir = Path("./temp_uploads")
+                upload_dir.mkdir(exist_ok=True)
+                final_path = upload_dir / uploaded_file.name
+                shutil.copy(tmp_path, final_path)
+
+                success = system.add_document(str(final_path))
+                if success:
+                    st.toast(f"✅ {uploaded_file.name} 添加成功")
+                else:
+                    st.toast(f"❌ {uploaded_file.name} 添加失败")
+
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+
+            status_text.text("处理完成！")
+            time.sleep(1)
+            st.rerun()
+
+    # 文档列表
+    with st.expander("查看已索引文档"):
+        docs_info = system.list_documents()
+        if docs_info and "documents" in docs_info:
+            for path, meta in docs_info["documents"].items():
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.text(f"📄 {Path(path).name}")
+                    st.caption(f"片段: {meta.get('chunk_count')} | 时间: {meta.get('added_at')}")
+                with col2:
+                    if st.button("删除", key=path):
+                        system.delete_document(path)
+                        st.rerun()
+        else:
+            st.info("暂无文档")
+
+# ==========================================
+# 主界面逻辑
+# ==========================================
+
+st.title("⚙️ 透平机械原理智能教学助手")
+
+# 使用 Tab 分隔不同功能
+tab1, tab2, tab3, tab4 = st.tabs(["💬 智能问答", "📝 生成练习题", "✏️ 作业批改", "📖 章节总结"])
+
+# ----------------------------------------------------------------------
+# TAB 1: 智能问答 (Chat)
+# ----------------------------------------------------------------------
+with tab1:
+    st.caption("基于多文档 RAG 技术，支持图文多模态回答。")
+
+    # 显示聊天记录
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "sources" in msg and msg["sources"]:
+                with st.expander("参考资料来源"):
+                    for src in msg["sources"]:
+                        if src.get("type") == "image":
+                            st.image(src["content_preview"], caption=src["file"], width=200)
+                        else:
+                            st.markdown(f"- **{src['file']}** (P{src['page']})")
+
+    # 处理用户输入
+    if prompt := st.chat_input("请输入关于透平机械的问题..."):
+        # 1. 显示用户消息
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # 2. 调用后端生成回答
+        with st.chat_message("assistant"):
+            with st.spinner("正在检索知识库并思考..."):
+                try:
+                    # 调用 Agent
+                    result = system.chat(prompt)
+                    response_text = result["response"]
+                    sources = result.get("sources", [])
+                    confidence = result.get("confidence", 0.0)
+
+                    # 显示回答
+                    st.markdown(response_text)
+
+                    # 显示置信度徽章
+                    if confidence > 0.7:
+                        st.success(f"置信度: High ({confidence:.2f})")
+                    elif confidence > 0.4:
+                        st.warning(f"置信度: Medium ({confidence:.2f})")
+                    else:
+                        st.error(f"置信度: Low ({confidence:.2f})")
+
+                    # 显示来源
+                    if sources:
+                        with st.expander("📚 参考资料来源"):
+                            for src in sources:
+                                if src.get("type") == "image":
+                                    # 处理图片路径
+                                    img_path = src["content_preview"].replace("Image Path: ", "")
+                                    if os.path.exists(img_path):
+                                        st.image(img_path, caption=f"插图: {src['file']}", width=300)
+                                else:
+                                    st.markdown(
+                                        f"- **文件**: {src['file']} | **页码**: {src['page']} | **分数**: {src['rerank_score']:.2f}")
+
+                    # 更新 Session State
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        "sources": sources
+                    })
+
+                except Exception as e:
+                    st.error(f"发生错误: {str(e)}")
+
+# ----------------------------------------------------------------------
+# TAB 2: 生成练习题
+# ----------------------------------------------------------------------
+with tab2:
+    st.header("智能出题")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        chapter = st.text_input("章节/主题", value="轴流式压缩机", help="输入你想练习的章节名称")
+        count = st.number_input("题目数量", min_value=1, max_value=10, value=3)
+
+    with col2:
+        q_type = st.selectbox("题目类型",
+                              options=["choice", "fill_blank", "short_answer", "calculation"],
+                              format_func=lambda x:
+                              {"choice": "选择题", "fill_blank": "填空题", "short_answer": "简答题",
+                               "calculation": "计算题"}[x])
+        difficulty = st.selectbox("难度等级", options=["easy", "medium", "hard"])
+
+    if st.button("🚀 生成题目", type="primary"):
+        with st.spinner("正在分析知识点并生成题目..."):
+            try:
+                result = system.generate_questions(
+                    chapter=chapter,
+                    question_type=q_type,
+                    count=count,
+                    difficulty=difficulty
+                )
+
+                st.markdown("### 生成结果")
+                # 后端返回的 response 已经是格式化好的 Markdown
+                st.markdown(result["response"])
+
+                # 如果有结构化数据，也可以自定义展示（可选）
+                # st.json(result.get("questions", []))
+
+            except Exception as e:
+                st.error(f"生成失败: {e}")
+
+# ----------------------------------------------------------------------
+# TAB 3: 作业批改
+# ----------------------------------------------------------------------
+with tab3:
+    st.header("智能作业批改")
+
+    st.info("支持直接输入文本或上传文件（PDF/Word）进行批改。")
+
+    col_stu, col_ref = st.columns(2)
+
+    # 学生答案输入
+    with col_stu:
+        st.subheader("👨‍🎓 学生作业")
+        stu_tab1, stu_tab2 = st.tabs(["文本输入", "文件上传"])
+        with stu_tab1:
+            student_text = st.text_area("粘贴学生答案", height=200)
+        with stu_tab2:
+            student_file = st.file_uploader("上传作业文件", type=['pdf', 'docx', 'txt'], key="stu_file")
+
+    # 参考标准输入
+    with col_ref:
+        st.subheader("👩‍🏫 参考标准 (可选)")
+        ref_tab1, ref_tab2 = st.tabs(["文本输入", "文件上传"])
+        with ref_tab1:
+            ref_text = st.text_area("粘贴标准答案 (留空则自动检索)", height=200)
+        with ref_tab2:
+            ref_file = st.file_uploader("上传参考文件", type=['pdf', 'docx', 'txt'], key="ref_file")
+
+    topic_input = st.text_input("作业主题 (辅助检索，如：离心机效率)", value="")
+
+    if st.button("📝 开始批改", type="primary"):
+        if not student_text and not student_file:
+            st.warning("请至少提供学生答案内容。")
+        else:
+            with st.spinner("正在解析文件并评估答案..."):
+                # 处理文件路径
+                s_path = ""
+                r_path = ""
+
+
+                # 辅助函数：保存上传文件到临时目录
+                def save_temp(uploaded_f):
+                    if uploaded_f is None: return ""
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_f.name).suffix) as tf:
+                        tf.write(uploaded_f.getvalue())
+                        return tf.name
+
+
+                s_path = save_temp(student_file)
+                r_path = save_temp(ref_file)
+
+                try:
+                    result = system.grade_homework(
+                        student_answer=student_text,
+                        student_file=s_path,
+                        reference=ref_text,
+                        reference_file=r_path,
+                        topic=topic_input
+                    )
+
+                    st.markdown("### 批改报告")
+                    st.markdown(result["response"])
+
+                    # 只有当解析成功时，grading 字段里才会有结构化数据
+                    if "grading" in result and "score" in result["grading"]:
+                        score = result["grading"]["score"]
+                        st.progress(min(score, 100) / 100)
+
+                except Exception as e:
+                    st.error(f"批改过程中出错: {e}")
+                finally:
+                    # 清理临时文件
+                    if s_path and os.path.exists(s_path): os.remove(s_path)
+                    if r_path and os.path.exists(r_path): os.remove(r_path)
+
+# ----------------------------------------------------------------------
+# TAB 4: 章节总结
+# ----------------------------------------------------------------------
+with tab4:
+    st.header("知识点总结")
+    summary_chapter = st.text_input("请输入需要总结的章节名称", placeholder="例如：多级轴流式压缩机")
+
+    if st.button("📑 生成总结"):
+        if not summary_chapter:
+            st.warning("请输入章节名称")
+        else:
+            with st.spinner(f"正在阅读并总结 '{summary_chapter}' 相关内容..."):
+                try:
+                    summary_res = system.summarize_chapter(summary_chapter)
+                    st.markdown(summary_res)
+                except Exception as e:
+                    st.error(f"总结失败: {e}")
+
+# 页脚
+st.divider()
+st.caption("© 2026 透平机械原理课程系统 | Powered by LangGraph & RAG")
