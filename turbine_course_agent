@@ -6,6 +6,9 @@
 2. 生成练习题 - 根据章节内容生成问答/选择题
 3. 作业批改 - 评估学生答案并给出反馈
 4. 知识检索 - 从课件和教材中检索相关内容
+
+作者: Claude
+日期: 2024
 """
 
 import os
@@ -16,7 +19,7 @@ from typing import List, Dict, Any, Optional, TypedDict, Annotated, Literal, Uni
 from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
-
+import re
 # LangGraph 核心组件
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -132,7 +135,9 @@ class KnowledgeBaseAdapter:
         if self.kb is None:
             logger.warning("知识库未初始化")
             return []
+
         try:
+            # 修正：调用 search (返回List[Document])，并移除多余参数
             return self.kb.search(question, k=k)
         except Exception as e:
             logger.error(f"检索失败: {e}")
@@ -469,10 +474,10 @@ class TurbineCourseAgent:
                 "history": chat_history[-6:] if chat_history else [],
                 "question": user_input
             })
-            
+
             # 打印出来看看究竟 LLM 返回了什么
-            logger.info(f"LLM 原始回答内容: [{answer}]") 
-            
+            logger.info(f"LLM 原始回答内容: [{answer}]")
+
             if not answer:
                 answer = "错误：LLM 返回了空内容，请检查 API Key 或 模型名称是否正确。"
 
@@ -620,107 +625,119 @@ class TurbineCourseAgent:
             }
 
     def _homework_grader_node(self, state: AgentState) -> AgentState:
-        """作业批改节点"""
-        user_input = state["user_input"]
-        student_answer = state.get("student_answer", "")
-        reference_content = state.get("reference_content", "")
+            """作业批改节点"""
+            user_input = state["user_input"]
+            student_answer = state.get("student_answer", "")
+            reference_content = state.get("reference_content", "")
 
-        # 【新增逻辑开始】处理检索到的标准答案/参考资料
-        retrieved_docs = state.get("retrieved_docs", [])
-        retrieved_context = ""
-        if retrieved_docs:
-            doc_texts = []
-            # 选取最相关的几个片段
-            for doc in retrieved_docs[:4]: 
-                source_name = doc.get('source', '未知来源')
-                content = doc.get('content', '')
-                doc_texts.append(f"【参考片段 (来源: {source_name})】\n{content}")
-            retrieved_context = "\n\n".join(doc_texts)
-        # 将检索内容合并到 reference_content 中
-        if retrieved_context:
-            if reference_content:
-                reference_content += f"\n\n=== 知识库检索到的参考资料 ===\n{retrieved_context}"
-            else:
-                reference_content = f"=== 知识库检索到的参考资料 ===\n{retrieved_context}"
-        # 【新增逻辑结束】
+            # 【新增逻辑开始】处理检索到的标准答案/参考资料
+            retrieved_docs = state.get("retrieved_docs", [])
+            retrieved_context = ""
+            if retrieved_docs:
+                doc_texts = []
+                # 选取最相关的几个片段
+                for doc in retrieved_docs[:4]:
+                    source_name = doc.get('source', '未知来源')
+                    content = doc.get('content', '')
+                    doc_texts.append(f"【参考片段 (来源: {source_name})】\n{content}")
+                retrieved_context = "\n\n".join(doc_texts)
+            # 将检索内容合并到 reference_content 中
+            if retrieved_context:
+                if reference_content:
+                    reference_content += f"\n\n=== 知识库检索到的参考资料 ===\n{retrieved_context}"
+                else:
+                    reference_content = f"=== 知识库检索到的参考资料 ===\n{retrieved_context}"
+            # 【新增逻辑结束】
 
-        # 如果没有单独的学生答案，尝试从用户输入中提取
-        if not student_answer:
-            student_answer = user_input
+            # 如果没有单独的学生答案，尝试从用户输入中提取
+            if not student_answer:
+                student_answer = user_input
 
-        # 批改提示词
-        grade_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是透平机械原理课程的作业批改助手。请对学生的答案进行专业、客观、鼓励性的评价。
+            # 批改提示词 (保持不变)
+            grade_prompt = ChatPromptTemplate.from_messages([
+                ("system", """你是透平机械原理课程的作业批改助手。请对学生的答案进行专业、客观、鼓励性的评价。
 
-【评分标准】
-1. 概念准确性（40%）: 专业术语使用是否正确，概念理解是否准确
-2. 逻辑完整性（30%）: 答案是否完整，逻辑是否清晰
-3. 表达规范性（20%）: 表达是否清晰，公式符号是否规范
-4. 创新思考（10%）: 是否有独到见解或延伸思考
+    【评分标准】
+    1. 概念准确性（40%）: 专业术语使用是否正确，概念理解是否准确
+    2. 逻辑完整性（30%）: 答案是否完整，逻辑是否清晰
+    3. 表达规范性（20%）: 表达是否清晰，公式符号是否规范
+    4. 创新思考（10%）: 是否有独到见解或延伸思考
 
-【输出格式】
-请以JSON格式输出评价结果：
-```json
-{{
-    "score": 得分(0-100),
-    "level": "评级(优秀/良好/中等/及格/不及格)",
-    "feedback": "总体评价",
-    "correct_points": ["答对的知识点1", "答对的知识点2"],
-    "wrong_points": ["错误点1及原因", "错误点2及原因"],
-    "suggestions": ["改进建议1", "改进建议2"],
-    "reference_answer": "参考答案或补充说明"
-}}
-```
+    【输出格式】
+    请以JSON格式输出评价结果：
+    ```json
+    {{
+        "score": 得分(0-100),
+        "level": "评级(优秀/良好/中等/及格/不及格)",
+        "feedback": "总体评价",
+        "correct_points": ["答对的知识点1", "答对的知识点2"],
+        "wrong_points": ["错误点1及原因", "错误点2及原因"],
+        "suggestions": ["改进建议1", "改进建议2"],
+        "reference_answer": "参考答案或补充说明"
+    }}
+    ```
 
-【批改原则】
-1. 客观公正，有理有据
-2. 指出问题的同时给予鼓励
-3. 提供具体的改进方向
-4. 如果答案基本正确但表述不完善，也要肯定学生的思路"""),
-            ("user", """【学生答案】
-{student_answer}
+    【批改原则】
+    1. 客观公正，有理有据
+    2. 指出问题的同时给予鼓励
+    3. 提供具体的改进方向
+    4. 如果答案基本正确但表述不完善，也要肯定学生的思路"""),
+                ("user", """【学生答案】
+    {student_answer}
 
-【参考资料/标准答案】
-{reference}
+    【参考资料/标准答案】
+    {reference}
 
-请批改这份作业。""")
-        ])
+    请批改这份作业。""")
+            ])
 
-        try:
-            chain = grade_prompt | self.llm | StrOutputParser()
-            result = chain.invoke({
-                "student_answer": student_answer,
-                "reference": reference_content if reference_content else "（无标准答案参考，请基于专业知识评判）"
-            })
+            try:
+                chain = grade_prompt | self.llm | StrOutputParser()
+                result = chain.invoke({
+                    "student_answer": student_answer,
+                    "reference": reference_content if reference_content else "（无标准答案参考，请基于专业知识评判）"
+                })
 
-            # 解析JSON
-            result = result.strip()
-            if "```json" in result:
-                result = result.split("```json")[1].split("```")[0]
-            elif "```" in result:
-                result = result.split("```")[1].split("```")[0]
+                # 【修改点 1：增强 JSON 解析的鲁棒性】
+                # 使用正则查找第一个 { 和最后一个 } 之间的内容
+                result = result.strip()
+                try:
+                    match = re.search(r"(\{.*\})", result, re.DOTALL)
+                    if match:
+                        json_str = match.group(1)
+                        grading = json.loads(json_str)
+                    else:
+                        # 尝试清理 Markdown 标记作为兜底
+                        if "```json" in result:
+                            json_str = result.split("```json")[1].split("```")[0]
+                        elif "```" in result:
+                            json_str = result.split("```")[1].split("```")[0]
+                        else:
+                            json_str = result
+                        grading = json.loads(json_str)
+                except Exception:
+                    # 如果正则和清理都失败，抛出异常进入下面的 except 块
+                    raise ValueError(f"无法从结果中提取 JSON: {result[:100]}...")
 
-            grading = json.loads(result)
+                logger.info(f"批改完成，得分: {grading.get('score', 'N/A')}")
 
-            logger.info(f"批改完成，得分: {grading.get('score', 'N/A')}")
-
-            return {
-                **state,
-                "grading_result": grading
-            }
-
-        except Exception as e:
-            logger.error(f"批改失败: {e}")
-            return {
-                **state,
-                "grading_result": {
-                    "score": -1,
-                    "feedback": f"批改过程出现错误: {str(e)}",
-                    "correct_points": [],
-                    "wrong_points": [],
-                    "suggestions": ["请重新提交作业"]
+                return {
+                    **state,
+                    "grading_result": grading
                 }
-            }
+
+            except Exception as e:
+                logger.error(f"批改失败: {e}")
+                return {
+                    **state,
+                    "grading_result": {
+                        "score": -1,
+                        "feedback": f"批改过程出现错误 (可能是模型输出格式异常): {str(e)}",
+                        "correct_points": [],
+                        "wrong_points": [],
+                        "suggestions": ["请检查输入内容长度或重试"]
+                    }
+                }
 
     def _summary_node(self, state: AgentState) -> AgentState:
         """章节总结节点"""
@@ -1052,42 +1069,38 @@ class TurbineCourseAgent:
 
         return result.get("questions", [])
 
-   def grade_answer(
+    def grade_answer(
             self,
             student_answer: str,
             reference: str = "",
             topic: str = ""
     ) -> Dict[str, Any]:
         """
-        批改答案的便捷方法 (更新版)
+        批改答案的便捷方法
 
         Args:
-            student_answer: 学生答案 (可能是解析后的长文本)
+            student_answer: 学生答案
             reference: 参考答案
-            topic: 作业主题 (用于构造检索查询)
+            topic: 作业主题
         """
-        # 构造用户输入 (User Input)
-        # 注意：不要把巨长的 PDF 解析内容直接放在 user_input 里去进行意图识别，
-        # 而是构造一个清晰的指令，把内容放在 kwargs (state) 里传递。
-        
+        # 构造简短的提示词，避免干扰意图识别
         if topic:
             prompt = f"请批改关于【{topic}】的作业"
         else:
-            # 截取一小段预览，避免 Prompt 过长
             preview = student_answer[:50].replace("\n", " ") + "..." if len(student_answer) > 50 else student_answer
             prompt = f"请批改这份作业: {preview}"
 
-        # 如果没有参考答案，且有主题，我们希望 Agent 能利用 Retriever 去检索
-        # Agent 的 _retriever_node 会使用 state["user_input"] 或 state["chapter_info"] 进行检索
-        
         result = self.chat(
             prompt,
             student_answer=student_answer,
             reference_content=reference,
-            chapter_info=topic  # 将 topic 传入 chapter_info，辅助 retrieval 节点检索
+            chapter_info=topic
         )
 
-        return result.get("grading", {})
+        # 【修改点 2：修复 KeyError】
+        # 返回完整的 result 字典，包含 'response' (文本回复) 和 'grading' (结构化数据)
+        # 这样调用方 interactive_main 就可以安全地访问 result["response"]
+        return result
 
 
 # ================================
