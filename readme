@@ -291,3 +291,5 @@ MIT License
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！
+
+在项目终端运行streamlit run app.py
