@@ -285,10 +285,6 @@ A: 确保Tesseract安装了中文语言包 (`chi_sim`)
 **Q: 生成的练习题格式不正确？**
 A: 系统会自动重试JSON解析，如仍失败会返回原始文本
 
-## 📄 License
-
-MIT License
 
 ## 🤝 贡献
-
 欢迎提交 Issue 和 Pull Request！
