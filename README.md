@@ -1,6 +1,7 @@
 # 🔧 透平机械原理课程智能系统
 
 基于 **LangGraph** 和 **多模态RAG** 构建的专业教育领域智能体 Agent
+在项目终端运行streamlit run app.py即可到达网址
 
 ## 📋 功能概览
 
