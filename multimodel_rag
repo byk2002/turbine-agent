@@ -433,6 +433,47 @@ class MultiDocumentKnowledgeBase:
         # 加载知识库必须在 chunk_store 初始化之后
         self._load_knowledge_base()
 
+    def parse_local_file(self, file_path: str) -> str:
+        """
+        直接解析本地文件内容返回字符串，不进行向量存储。
+        用于提取参考答案、临时上下文等。
+        """
+        file_path_obj = Path(file_path).resolve()
+        if not file_path_obj.exists():
+            logger.error(f"文件未找到: {file_path}")
+            return ""
+
+        logger.info(f"正在解析临时参考文件: {file_path_obj.name}")
+        content = ""
+        try:
+            # 根据后缀选择解析方式
+            suffix = file_path_obj.suffix.lower()
+
+            if suffix == '.pdf':
+                # 复用类中已经初始化的 pdf_parser
+                raw_docs = self.pdf_parser.extract(str(file_path_obj))
+                # 将所有页面的内容合并
+                content = "\n\n".join([doc.page_content for doc in raw_docs if doc.page_content])
+
+            elif suffix == '.docx':
+                # 需要确保导入了 UnstructuredWordDocumentLoader
+                loader = UnstructuredWordDocumentLoader(str(file_path_obj))
+                docs = loader.load()
+                content = "\n\n".join([doc.page_content for doc in docs])
+
+            else:
+                # 默认尝试作为纯文本读取
+                loader = TextLoader(str(file_path_obj), encoding='utf-8')
+                docs = loader.load()
+                content = "\n\n".join([doc.page_content for doc in docs])
+
+            logger.info(f"文件解析成功，长度: {len(content)} 字符")
+            return content
+
+        except Exception as e:
+            logger.error(f"解析文件失败: {e}", exc_info=True)
+            return f"Error parsing file: {str(e)}"
+
     def _process_unstructured_documents(self, raw_documents: List[Document]) -> List[Document]:
         """
         改进版：智能选择是否需要二次切割
