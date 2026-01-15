@@ -1,0 +1,293 @@
+# 🔧 透平机械原理课程智能系统
+
+基于 **LangGraph** 和 **多模态RAG** 构建的专业教育领域智能体 Agent
+
+## 📋 功能概览
+
+| 功能 | 描述 | 示例 |
+|------|------|------|
+| 💬 专业问答 | 回答透平机械相关问题 | "什么是轴流式压缩机的工作原理？" |
+| 📝 生成练习题 | 根据章节生成不同题型 | "生成5道离心式压缩机的选择题" |
+| ✏️ 批改作业 | 评估学生答案并给出反馈 | "批改：透平是将热能转换为机械能的设备" |
+| 📖 章节总结 | 归纳知识点和学习重点 | "总结叶轮机械的基本方程" |
+
+## 🏗️ 系统架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TurbineCourseAgent                        │
+│                   (LangGraph 工作流)                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────┐     ┌───────────────────────────────────┐     │
+│  │ 用户输入 │────▶│      意图识别节点                  │     │
+│  └──────────┘     │  (IntentClassifier)               │     │
+│                   └───────────────┬───────────────────┘     │
+│                                   │                          │
+│              ┌────────────────────┼────────────────────┐     │
+│              │                    │                    │     │
+│              ▼                    ▼                    ▼     │
+│  ┌──────────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │   检索节点       │  │  批改节点    │  │   ...        │   │
+│  │   (Retriever)    │  │  (Grader)    │  │              │   │
+│  └────────┬─────────┘  └──────────────┘  └──────────────┘   │
+│           │                                                  │
+│    ┌──────┴──────┬──────────────┐                           │
+│    ▼             ▼              ▼                           │
+│ ┌──────┐   ┌──────────┐  ┌──────────┐                       │
+│ │ QA   │   │ 生成练习 │  │ 总结    │                        │
+│ │ Node │   │   Node   │  │ Node    │                        │
+│ └──────┘   └──────────┘  └──────────┘                       │
+│                   │                                          │
+│                   ▼                                          │
+│         ┌─────────────────┐                                 │
+│         │  响应格式化节点  │                                 │
+│         │ (ResponseFormatter)│                               │
+│         └─────────────────┘                                 │
+│                   │                                          │
+│                   ▼                                          │
+│            ┌───────────┐                                    │
+│            │  最终输出  │                                    │
+│            └───────────┘                                    │
+├─────────────────────────────────────────────────────────────┤
+│              MultiDocumentKnowledgeBase                      │
+│              (多模态RAG知识库)                               │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │ PDF解析器    │  │ BM25检索器   │  │ 向量检索器   │       │
+│  │ (Unstructured)│  │ (中文优化)  │  │ (Chroma)     │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│                          │                                   │
+│                          ▼                                   │
+│                   ┌──────────────┐                          │
+│                   │ RRF融合+重排 │                          │
+│                   │ (CrossEncoder)│                          │
+│                   └──────────────┘                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 📁 项目结构
+
+```
+turbine_agent/
+├── turbine_course_agent.py      # LangGraph Agent 核心实现
+├── turbine_system_integration.py # 整合系统 (RAG + Agent)
+├── multimodal_rag.py            # 原始多模态RAG代码 (用户提供)
+├── requirements.txt              # 依赖列表
+├── README.md                     # 本说明文档
+└── config/
+    └── .env                      # 环境变量配置
+```
+
+## 🚀 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 配置环境变量
+
+```bash
+# Linux/Mac
+export OPENAI_API_KEY="your-api-key"
+export OPENAI_API_BASE="https://api.openai.com/v1"  # 或您的代理地址
+
+# Windows
+set OPENAI_API_KEY=your-api-key
+```
+
+### 3. 准备原始RAG代码
+
+将您的多模态RAG代码保存为 `multimodal_rag.py`
+
+### 4. 运行系统
+
+```bash
+python turbine_system_integration.py
+```
+
+## 💡 使用示例
+
+### 示例1: 直接使用Agent
+
+```python
+from turbine_course_agent import TurbineCourseAgent
+from langchain_openai import ChatOpenAI
+
+# 创建LLM
+llm = ChatOpenAI(
+    openai_api_key="your-api-key",
+    model="gpt-4o",
+    temperature=0.3
+)
+
+# 创建Agent
+agent = TurbineCourseAgent(llm=llm)
+
+# 问答
+result = agent.chat("什么是透平机械？")
+print(result["response"])
+
+# 生成练习题
+questions = agent.generate_questions(
+    chapter="轴流式压缩机",
+    question_type="choice",
+    count=5,
+    difficulty="medium"
+)
+
+# 批改作业
+grading = agent.grade_answer(
+    student_answer="透平是一种将流体能量转换为机械能的旋转式动力机械",
+    reference="透平是利用流体的动能或压力能，转化为机械功的旋转式动力机械"
+)
+```
+
+### 示例2: 使用整合系统
+
+```python
+from turbine_system_integration import TurbineMachinerySystem
+
+# 初始化系统
+system = TurbineMachinerySystem(
+    kb_path="./my_turbine_kb",
+    openai_api_key="your-api-key"
+)
+
+# 添加课程文档
+system.add_document("透平机械原理.pdf")
+system.add_documents_from_directory("./课件/")
+
+# 问答
+answer = system.ask_question("离心式压缩机与轴流式压缩机有什么区别？")
+
+# 生成练习题
+system.generate_questions(
+    chapter="第三章 离心式压缩机",
+    question_type="calculation",
+    count=3,
+    difficulty="hard"
+)
+
+# 批改作业
+system.grade_homework(
+    student_answer="...",
+    reference="..."
+)
+```
+
+### 示例3: 使用自定义微调模型
+
+```python
+from turbine_course_agent import TurbineCourseAgent
+
+# 假设您有一个微调过的模型
+from your_custom_model import YourFineTunedLLM
+
+custom_llm = YourFineTunedLLM(
+    model_path="./models/turbine_finetuned_model",
+    device="cuda"
+)
+
+# 使用自定义模型创建Agent
+agent = TurbineCourseAgent(
+    custom_fine_tuned_llm=custom_llm
+)
+```
+
+## 🎯 支持的题型
+
+| 题型代码 | 名称 | 说明 |
+|----------|------|------|
+| `choice` | 选择题 | 单选题，包含4个选项 |
+| `fill_blank` | 填空题 | 用___表示空白 |
+| `short_answer` | 简答题 | 50-150字简短回答 |
+| `calculation` | 计算题 | 包含计算步骤和答案 |
+
+## 📊 批改评分标准
+
+| 维度 | 权重 | 说明 |
+|------|------|------|
+| 概念准确性 | 40% | 专业术语和概念理解 |
+| 逻辑完整性 | 30% | 答案完整度和逻辑性 |
+| 表达规范性 | 20% | 表达清晰度、公式规范 |
+| 创新思考 | 10% | 独到见解或延伸 |
+
+## ⚙️ 高级配置
+
+### 调整检索参数
+
+```python
+result = system.chat(
+    "问题",
+    k=10,                                    # 检索文档数
+    rerank_top_n=7,                          # 重排后保留数
+    history_relevance_threshold_for_llm=0.5, # 历史相关度阈值
+    max_context_length=4000                  # 最大上下文长度
+)
+```
+
+### 自定义知识库配置
+
+```python
+# 在 multimodal_rag.py 中可调整:
+# - chunk_size: 文档切块大小
+# - chunk_overlap: 切块重叠
+# - embedding_model: 嵌入模型
+# - reranker_model: 重排模型
+```
+
+## 🔧 扩展开发
+
+### 添加新的Agent节点
+
+```python
+def _custom_node(self, state: AgentState) -> AgentState:
+    """自定义节点"""
+    # 实现您的逻辑
+    return {
+        **state,
+        "custom_output": "..."
+    }
+
+# 在 _build_graph() 中添加:
+workflow.add_node("custom_node", self._custom_node)
+```
+
+### 添加新的意图类型
+
+```python
+class IntentType(str, Enum):
+    # 现有意图...
+    CUSTOM_INTENT = "custom"  # 新增
+
+# 更新意图识别提示词和路由逻辑
+```
+
+## 📝 注意事项
+
+1. **首次运行**会下载嵌入模型和重排模型，请确保网络通畅
+2. **PDF解析**依赖 Tesseract OCR，Windows用户需单独安装
+3. **API调用**会产生费用，请注意控制使用量
+4. **知识库数据**默认存储在本地，注意备份重要数据
+
+## 🐛 常见问题
+
+**Q: 知识库初始化失败？**
+A: 检查是否正确放置了 `multimodal_rag.py` 文件
+
+**Q: OCR识别中文效果差？**
+A: 确保Tesseract安装了中文语言包 (`chi_sim`)
+
+**Q: 生成的练习题格式不正确？**
+A: 系统会自动重试JSON解析，如仍失败会返回原始文本
+
+## 📄 License
+
+MIT License
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
