@@ -228,19 +228,39 @@ class TurbineMachinerySystem:
             difficulty=difficulty
         )
 
-    def grade_homework(self, student_answer: str, reference: str = "", reference_file: str = ""):
+    def grade_homework(self, student_answer: str = "", student_file: str = "", 
+                      reference: str = "", reference_file: str = "", 
+                      topic: str = ""):
         """
+        批改作业功能升级版
         Args:
-            student_answer: 学生答案
-            reference: 参考答案/评分标准（文本）
-            reference_file: 参考答案文件路径（PDF等）
+            student_answer: 学生答案文本
+            student_file: 学生作业文件路径 (PDF/Word)
+            reference: 参考答案文本
+            reference_file: 参考答案文件路径 (PDF/Word)
+            topic: 作业主题/章节 (用于知识库检索)
         """
+        final_student_answer = student_answer
         final_reference = reference
 
-        # 如果提供了参考文件，解析并追加到参考内容中
+        # 1. 解析学生作业文件 (如有)
+        if student_file:
+            if self.knowledge_base:
+                print(f"⏳ 正在解析学生作业文件: {student_file} ...")
+                # 复用 multimodel_rag.py 中已有的 parse_local_file 方法
+                file_content = self.knowledge_base.parse_local_file(student_file)
+                if file_content:
+                    if final_student_answer:
+                        final_student_answer += f"\n\n【学生上传文件内容】\n{file_content}"
+                    else:
+                        final_student_answer = f"【学生上传文件内容】\n{file_content}"
+            else:
+                print("⚠️ 知识库模块未初始化，无法解析学生文件。")
+        
+        # 2. 解析参考答案文件 (如有)
         if reference_file:
             if self.knowledge_base:
-                print(f"⏳ 正在读取参考文件: {reference_file} ...")
+                print(f"⏳ 正在解析参考答案文件: {reference_file} ...")
                 file_content = self.knowledge_base.parse_local_file(reference_file)
                 if file_content:
                     if final_reference:
@@ -248,11 +268,14 @@ class TurbineMachinerySystem:
                     else:
                         final_reference = f"【参考文档内容】\n{file_content}"
             else:
-                print("⚠️ 知识库模块未初始化，无法解析参考文件，将仅使用文本参考。")
+                print("⚠️ 知识库模块未初始化，无法解析参考文件。")
 
+        # 3. 调用 Agent 进行批改
+        # 如果没有提供参考答案，Agent 会根据 topic 去知识库检索
         return self.agent.grade_answer(
-            student_answer=student_answer,
-            reference=final_reference
+            student_answer=final_student_answer,
+            reference=final_reference,
+            topic=topic
         )
 
     def summarize_chapter(self, chapter_name: str):
@@ -419,35 +442,59 @@ def interactive_main():
             print("\n" + result["response"])
 
         elif choice == "7":
-            # 批改作业
+            # 批改作业 - 交互流程更新
             print("\n✏️ 作业批改")
             print("-" * 50)
-            print("请输入学生答案 (输入完成后按两次Enter):")
-            lines = []
-            while True:
-                line = input()
-                if line == "":
-                    break
-                lines.append(line)
-            student_answer = "\n".join(lines)
-            if student_answer.strip():
-                # 询问参考答案类型
+            
+            # --- 第一步：获取学生答案 ---
+            print("请选择学生作业来源:")
+            print("1. 直接输入文本")
+            print("2. 上传作业文件 (PDF/Word/TXT)")
+            stu_choice = input("请输入选择 (1-2): ").strip()
+            
+            student_answer_text = ""
+            student_file_path = ""
+            
+            if stu_choice == "1":
+                print("\n请输入学生答案 (输入完成后按两次Enter):")
+                lines = []
+                while True:
+                    line = input()
+                    if line == "":
+                        break
+                    lines.append(line)
+                student_answer_text = "\n".join(lines)
+            elif stu_choice == "2":
+                student_file_path = input("\n请输入学生作业文件的完整路径: ").strip().strip('"')
+            
+            # --- 第二步：获取参考标准 ---
+            if student_answer_text or student_file_path:
                 print("\n请选择参考答案/评分标准来源:")
                 print("1. 直接输入文本")
                 print("2. 上传参考文档 (PDF/Word)")
-                print("3. 无参考 (直接跳过)")
+                print("3. 无参考 (自动从知识库检索相关知识)")
                 ref_choice = input("请输入选择 (1-3): ").strip()
+                
                 reference_text = ""
                 reference_file_path = ""
+                topic_info = ""
+                
                 if ref_choice == "1":
                     reference_text = input("\n请输入参考答案文本: ").strip()
                 elif ref_choice == "2":
                     reference_file_path = input("\n请输入参考文档的完整路径: ").strip().strip('"')
-                print("\n⏳ 正在批改...")
+                elif ref_choice == "3":
+                    topic_info = input("\n请输入作业的主题/章节 (用于辅助检索，如'离心压缩机'): ").strip()
+                    if not topic_info:
+                        topic_info = "透平机械原理作业"
+
+                print("\n⏳ 正在批改... (如果文件较大，请稍候)")
                 result = system.grade_homework(
-                    student_answer=student_answer,
+                    student_answer=student_answer_text,
+                    student_file=student_file_path,
                     reference=reference_text,
-                    reference_file=reference_file_path
+                    reference_file=reference_file_path,
+                    topic=topic_info
                 )
                 print("\n" + result["response"])
             else:
