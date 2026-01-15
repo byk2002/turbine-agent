@@ -242,7 +242,7 @@ class TurbineCourseAgent:
             {
                 "qa": "retriever",
                 "generate": "retriever",
-                "grade": "homework_grader",
+                "grade": "retriever",
                 "summary": "retriever",
                 "error": "error_handler"
             }
@@ -255,7 +255,8 @@ class TurbineCourseAgent:
             {
                 "qa": "qa_node",
                 "generate": "question_generator",
-                "summary": "summary_node"
+                "summary": "summary_node",
+                "grade": "homework_grader"
             }
         )
 
@@ -627,6 +628,25 @@ class TurbineCourseAgent:
         student_answer = state.get("student_answer", "")
         reference_content = state.get("reference_content", "")
 
+        # 【新增逻辑开始】处理检索到的标准答案/参考资料
+        retrieved_docs = state.get("retrieved_docs", [])
+        retrieved_context = ""
+        if retrieved_docs:
+            doc_texts = []
+            # 选取最相关的几个片段
+            for doc in retrieved_docs[:4]: 
+                source_name = doc.get('source', '未知来源')
+                content = doc.get('content', '')
+                doc_texts.append(f"【参考片段 (来源: {source_name})】\n{content}")
+            retrieved_context = "\n\n".join(doc_texts)
+        # 将检索内容合并到 reference_content 中
+        if retrieved_context:
+            if reference_content:
+                reference_content += f"\n\n=== 知识库检索到的参考资料 ===\n{retrieved_context}"
+            else:
+                reference_content = f"=== 知识库检索到的参考资料 ===\n{retrieved_context}"
+        # 【新增逻辑结束】
+
         # 如果没有单独的学生答案，尝试从用户输入中提取
         if not student_answer:
             student_answer = user_input
@@ -929,7 +949,8 @@ class TurbineCourseAgent:
         route_map = {
             IntentType.QA: "qa",
             IntentType.GENERATE_QUESTIONS: "generate",
-            IntentType.SUMMARY: "summary"
+            IntentType.SUMMARY: "summary",
+            IntentType.GRADE_HOMEWORK: "grade"
         }
 
         return route_map.get(intent, "qa")
