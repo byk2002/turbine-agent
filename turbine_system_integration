@@ -228,17 +228,31 @@ class TurbineMachinerySystem:
             difficulty=difficulty
         )
 
-    def grade_homework(self, student_answer: str, reference: str = ""):
+    def grade_homework(self, student_answer: str, reference: str = "", reference_file: str = ""):
         """
-        批改作业
-
         Args:
             student_answer: 学生答案
-            reference: 参考答案/评分标准
+            reference: 参考答案/评分标准（文本）
+            reference_file: 参考答案文件路径（PDF等）
         """
+        final_reference = reference
+
+        # 如果提供了参考文件，解析并追加到参考内容中
+        if reference_file:
+            if self.knowledge_base:
+                print(f"⏳ 正在读取参考文件: {reference_file} ...")
+                file_content = self.knowledge_base.parse_local_file(reference_file)
+                if file_content:
+                    if final_reference:
+                        final_reference += f"\n\n【参考文档内容】\n{file_content}"
+                    else:
+                        final_reference = f"【参考文档内容】\n{file_content}"
+            else:
+                print("⚠️ 知识库模块未初始化，无法解析参考文件，将仅使用文本参考。")
+
         return self.agent.grade_answer(
             student_answer=student_answer,
-            reference=reference
+            reference=final_reference
         )
 
     def summarize_chapter(self, chapter_name: str):
@@ -416,15 +430,24 @@ def interactive_main():
                     break
                 lines.append(line)
             student_answer = "\n".join(lines)
-
             if student_answer.strip():
-                reference = input("\n参考答案/评分标准 (可选，直接Enter跳过): ").strip()
-
+                # 询问参考答案类型
+                print("\n请选择参考答案/评分标准来源:")
+                print("1. 直接输入文本")
+                print("2. 上传参考文档 (PDF/Word)")
+                print("3. 无参考 (直接跳过)")
+                ref_choice = input("请输入选择 (1-3): ").strip()
+                reference_text = ""
+                reference_file_path = ""
+                if ref_choice == "1":
+                    reference_text = input("\n请输入参考答案文本: ").strip()
+                elif ref_choice == "2":
+                    reference_file_path = input("\n请输入参考文档的完整路径: ").strip().strip('"')
                 print("\n⏳ 正在批改...")
-                result = system.chat(
-                    f"请批改以下答案: {student_answer}",
+                result = system.grade_homework(
                     student_answer=student_answer,
-                    reference_content=reference
+                    reference=reference_text,
+                    reference_file=reference_file_path
                 )
                 print("\n" + result["response"])
             else:
