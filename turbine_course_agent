@@ -1066,7 +1066,7 @@ class TurbineCourseAgent:
 
     def grade_answer(
             self,
-            student_answer: str,
+            student_answer: str= "",
             reference: str = "",
             topic: str = ""
     ) -> Dict[str, Any]:
@@ -1106,7 +1106,7 @@ def create_agent_with_custom_model(
         kb_path: str,
         openai_api_key: str,
         openai_api_base: str = "https://api.zchat.tech/v1",
-        model_name: str = "gemini-3-pro",
+        model_name: str = "gpt-5-1",
         custom_model_path: str = None
 ):
     """
@@ -1174,7 +1174,7 @@ def main():
     llm = ChatOpenAI(
         openai_api_key=openai_api_key,
         openai_api_base=os.getenv("OPENAI_API_BASE", "https://api.zchat.tech/v1"),
-        model=os.getenv("MODEL_NAME", "gemini-3-pro"),
+        model=os.getenv("MODEL_NAME", "gpt-5-1"),
         temperature=0.3
     )
 
