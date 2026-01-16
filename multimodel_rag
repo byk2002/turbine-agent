@@ -4,6 +4,7 @@ import math
 import pickle
 import jieba
 import json
+import docx
 from unstructured.partition.pdf import partition_pdf
 from unstructured.documents.elements import Table, Image as UnstructuredImage
 # 引入必要的 LangChain 消息类
@@ -381,7 +382,7 @@ class MultiDocumentKnowledgeBase:
             self.llm = ChatOpenAI(
                 openai_api_key=self._openai_api_key,  # 本地模型通常不需要真实 Key
                 openai_api_base="https://api.zchat.tech/v1",  # 您的微调模型服务地址
-                model_name="gemini-3-pro",  # 您的模型名称
+                model_name="gpt-5-1",  # 您的模型名称
                 temperature=0.1  # 专业领域建议低温度
                 )
 
@@ -460,7 +461,6 @@ class MultiDocumentKnowledgeBase:
                 print(f"DEBUG: 正在尝试使用 python-docx 解析: {file_path_obj}")  # 添加这行
                 try:
                     # 优先使用 python-docx 直接解析，更稳定
-                    import docx
                     doc = docx.Document(str(file_path_obj))
                     content = "\n".join([para.text for para in doc.paragraphs])
                     print(f"DEBUG: python-docx 解析成功，提取字符数: {len(content)}")  # 添加这行
