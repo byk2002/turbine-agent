@@ -475,8 +475,8 @@ class TurbineCourseAgent:
                 "question": user_input
             })
 
-            # 打印出来看看究竟 LLM 返回了什么
-            logger.info(f"LLM 原始回答内容: [{answer}]")
+            # debug 级别，这样在 INFO 模式下就不会显示了
+            logger.debug(f"LLM 原始回答内容: [{answer}]")
 
             if not answer:
                 answer = "错误：LLM 返回了空内容，请检查 API Key 或 模型名称是否正确。"
