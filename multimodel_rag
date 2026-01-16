@@ -28,12 +28,13 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.callbacks import CallbackManagerForRetrieverRun
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 import numpy as np
 import shutil
 from collections import defaultdict
@@ -146,9 +147,9 @@ class ChineseBM25Retriever(BM25Retriever):
         return super().from_documents(processed_docs, **kwargs)
 
     def _get_relevant_documents(
-        self, 
-        query: str, 
-        *, 
+        self,
+        query: str,
+        *,
         run_manager: CallbackManagerForRetrieverRun = None
     ) -> List[Document]:
         # 对查询也进行分词
@@ -380,7 +381,7 @@ class MultiDocumentKnowledgeBase:
             self.llm = ChatOpenAI(
                 openai_api_key=self._openai_api_key,  # 本地模型通常不需要真实 Key
                 openai_api_base="https://api.zchat.tech/v1",  # 您的微调模型服务地址
-                model_name="gpt-5-1",  # 您的模型名称
+                model_name="gemini-3-pro",  # 您的模型名称
                 temperature=0.1  # 专业领域建议低温度
                 )
 
@@ -456,11 +457,20 @@ class MultiDocumentKnowledgeBase:
                 content = "\n\n".join([doc.page_content for doc in raw_docs if doc.page_content])
 
             elif suffix == '.docx':
-                # 需要确保导入了 UnstructuredWordDocumentLoader
-                loader = UnstructuredWordDocumentLoader(str(file_path_obj))
-                docs = loader.load()
-                content = "\n\n".join([doc.page_content for doc in docs])
-
+                print(f"DEBUG: 正在尝试使用 python-docx 解析: {file_path_obj}")  # 添加这行
+                try:
+                    # 优先使用 python-docx 直接解析，更稳定
+                    import docx
+                    doc = docx.Document(str(file_path_obj))
+                    content = "\n".join([para.text for para in doc.paragraphs])
+                    print(f"DEBUG: python-docx 解析成功，提取字符数: {len(content)}")  # 添加这行
+                except Exception as e:
+                    # 回退到 Unstructured
+                    print(f"DEBUG: python-docx 失败，原因: {e}")  # 添加这行
+                    logger.warning(f"python-docx 解析失败，尝试使用 Unstructured: {e}")
+                    loader = UnstructuredWordDocumentLoader(str(file_path_obj))
+                    docs = loader.load()
+                    content = "\n\n".join([doc.page_content for doc in docs])
             else:
                 # 默认尝试作为纯文本读取
                 loader = TextLoader(str(file_path_obj), encoding='utf-8')
@@ -1780,7 +1790,7 @@ def main():
         return 1
 
     try:
-        kb = MultiDocumentKnowledgeBase("./multimodel_doc_kb_memory_qwen_chunk", openai_api_key=openai_api_key)
+        kb = MultiDocumentKnowledgeBase("./turbine_machine", openai_api_key=openai_api_key,llm_instance=None)
 
         current_session_id = "user1_session"
 
