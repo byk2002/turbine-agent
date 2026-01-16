@@ -61,7 +61,7 @@ class TurbineMachinerySystem:
             kb_path: str = "./multimodel_doc_kb_memory_qwen_chunk",
             openai_api_key: str = None,
             openai_api_base: str = None,
-            model_name: str = "gemini-3-pro",
+            model_name: str = "gpt-5-1",
             custom_llm=None
     ):
         """
