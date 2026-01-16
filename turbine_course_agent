@@ -6,9 +6,6 @@
 2. 生成练习题 - 根据章节内容生成问答/选择题
 3. 作业批改 - 评估学生答案并给出反馈
 4. 知识检索 - 从课件和教材中检索相关内容
-
-作者: Claude
-日期: 2024
 """
 
 import os
@@ -475,9 +472,6 @@ class TurbineCourseAgent:
                 "question": user_input
             })
 
-            # debug 级别，这样在 INFO 模式下就不会显示了
-            logger.debug(f"LLM 原始回答内容: [{answer}]")
-
             if not answer:
                 answer = "错误：LLM 返回了空内容，请检查 API Key 或 模型名称是否正确。"
 
@@ -701,6 +695,7 @@ class TurbineCourseAgent:
                 # 【修改点 1：增强 JSON 解析的鲁棒性】
                 # 使用正则查找第一个 { 和最后一个 } 之间的内容
                 result = result.strip()
+                result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
                 try:
                     match = re.search(r"(\{.*\})", result, re.DOTALL)
                     if match:
@@ -1111,7 +1106,7 @@ def create_agent_with_custom_model(
         kb_path: str,
         openai_api_key: str,
         openai_api_base: str = "https://api.zchat.tech/v1",
-        model_name: str = "gpt-4o",
+        model_name: str = "gemini-3-pro",
         custom_model_path: str = None
 ):
     """
@@ -1179,7 +1174,7 @@ def main():
     llm = ChatOpenAI(
         openai_api_key=openai_api_key,
         openai_api_base=os.getenv("OPENAI_API_BASE", "https://api.zchat.tech/v1"),
-        model=os.getenv("MODEL_NAME", "gpt-5-1"),
+        model=os.getenv("MODEL_NAME", "gemini-3-pro"),
         temperature=0.3
     )
 
