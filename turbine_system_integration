@@ -61,7 +61,7 @@ class TurbineMachinerySystem:
             kb_path: str = "./multimodel_doc_kb_memory_qwen_chunk",
             openai_api_key: str = None,
             openai_api_base: str = None,
-            model_name: str = "gpt-5-1",
+            model_name: str = "gemini-3-pro",
             custom_llm=None
     ):
         """
@@ -228,9 +228,9 @@ class TurbineMachinerySystem:
             difficulty=difficulty
         )
 
-    def grade_homework(self, student_answer: str = "", student_file: str = "", 
-                      reference: str = "", reference_file: str = "", 
-                      topic: str = ""):
+    def grade_homework(self, student_answer: str = "", student_file: str = "",
+                       reference: str = "", reference_file: str = "",
+                       topic: str = ""):
         """
         批改作业功能升级版
         Args:
@@ -256,7 +256,7 @@ class TurbineMachinerySystem:
                         final_student_answer = f"【学生上传文件内容】\n{file_content}"
             else:
                 print("⚠️ 知识库模块未初始化，无法解析学生文件。")
-        
+
         # 2. 解析参考答案文件 (如有)
         if reference_file:
             if self.knowledge_base:
@@ -324,7 +324,7 @@ def interactive_main():
     print("\n正在初始化系统...")
     try:
         system = TurbineMachinerySystem(
-            kb_path="./multimodel_doc_kb_memory_qwen_chunk",
+            kb_path="./turbine_machine",
             openai_api_base=os.getenv("OPENAI_API_BASE", "https://api.zchat.tech/v1")
         )
     except Exception as e:
@@ -441,20 +441,18 @@ def interactive_main():
             )
             print("\n" + result["response"])
 
+
         elif choice == "7":
             # 批改作业 - 交互流程更新
             print("\n✏️ 作业批改")
             print("-" * 50)
-            
             # --- 第一步：获取学生答案 ---
             print("请选择学生作业来源:")
             print("1. 直接输入文本")
             print("2. 上传作业文件 (PDF/Word/TXT)")
             stu_choice = input("请输入选择 (1-2): ").strip()
-            
             student_answer_text = ""
             student_file_path = ""
-            
             if stu_choice == "1":
                 print("\n请输入学生答案 (输入完成后按两次Enter):")
                 lines = []
@@ -466,7 +464,6 @@ def interactive_main():
                 student_answer_text = "\n".join(lines)
             elif stu_choice == "2":
                 student_file_path = input("\n请输入学生作业文件的完整路径: ").strip().strip('"')
-            
             # --- 第二步：获取参考标准 ---
             if student_answer_text or student_file_path:
                 print("\n请选择参考答案/评分标准来源:")
@@ -474,11 +471,9 @@ def interactive_main():
                 print("2. 上传参考文档 (PDF/Word)")
                 print("3. 无参考 (自动从知识库检索相关知识)")
                 ref_choice = input("请输入选择 (1-3): ").strip()
-                
                 reference_text = ""
                 reference_file_path = ""
                 topic_info = ""
-                
                 if ref_choice == "1":
                     reference_text = input("\n请输入参考答案文本: ").strip()
                 elif ref_choice == "2":
@@ -487,7 +482,6 @@ def interactive_main():
                     topic_info = input("\n请输入作业的主题/章节 (用于辅助检索，如'离心压缩机'): ").strip()
                     if not topic_info:
                         topic_info = "透平机械原理作业"
-
                 print("\n⏳ 正在批改... (如果文件较大，请稍候)")
                 result = system.grade_homework(
                     student_answer=student_answer_text,
